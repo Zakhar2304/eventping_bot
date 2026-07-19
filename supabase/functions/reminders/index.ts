@@ -1,6 +1,7 @@
 import {
   adminClient,
   getEnv,
+  listAllEventReminderMap,
   listConnectedUsers,
   listReminderRules,
 } from "../_shared/db.ts";
@@ -76,8 +77,9 @@ Deno.serve(async (req) => {
       const rules = await listReminderRules(db, user.telegram_id);
       const beforeMins = rules
         .filter((r) => r.kind === "before" && r.minutes_before)
-        .map((r) => r.minutes_before!) ;
-      const due = await eventsNeedingReminder(db, user, beforeMins, 1);
+        .map((r) => r.minutes_before!);
+      const perEvent = await listAllEventReminderMap(db, user.telegram_id);
+      const due = await eventsNeedingReminder(db, user, beforeMins, 1, perEvent);
       for (const { event, remindAt, minutesBefore } of due) {
         const { data: existing } = await db
           .from("sent_reminders")

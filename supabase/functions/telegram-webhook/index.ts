@@ -1,12 +1,16 @@
 import {
   addAbsoluteReminder,
   addBeforeReminder,
+  addEventReminder,
   adminClient,
   clearSession,
   deleteReminderRule,
   getSession,
   getUser,
+  listEventReminders,
   listReminderRules,
+  removeEventReminder,
+  setEventReminders,
   setSession,
   updateUser,
   upsertUser,
@@ -27,9 +31,13 @@ import {
 import {
   buildAuthUrl,
   createEvent,
+  eventCivilParts,
   formatWhen,
+  getEvent,
   listUpcoming,
   oauthRedirectUri,
+  updateEvent,
+  type CalendarEvent,
 } from "../_shared/google.ts";
 import {
   answerCallback,
@@ -42,9 +50,9 @@ import {
 
 const HELP =
   `<b>EventPing</b> — нагадування та події з Google Calendar.\n\n` +
-  `<b>Нова подія:</b> крок за кроком — дата → час → назва.\n` +
-  `Час можна писати так: <code>15</code>, <code>15:00</code>, <code>15 00</code>, <code>8:30</code>, <code>8 30</code>.\n\n` +
-  `У ⚙️ Налаштування можна додати <b>кілька нагадувань</b>: за скільки до події або на точну дату/час.`;
+  `<b>Нова подія:</b> дата → час → назва, далі можна відредагувати назву/час/дату/опис/нагадування.\n` +
+  `<b>Редагування:</b> 📅 Найближчі → ✏️ біля події.\n` +
+  `Час: <code>15</code>, <code>15:00</code>, <code>15 00</code>, <code>8:30</code>, <code>8 30</code>.`;
 
 function connected(u: { google_refresh_token: string | null }) {
   return !!u.google_refresh_token;
@@ -82,11 +90,106 @@ function dateKeyboard() {
 function confirmKb() {
   return {
     inline_keyboard: [
+      [{ text: "✅ Створити", callback_data: "event:confirm" }],
       [
-        { text: "✅ Створити", callback_data: "event:confirm" },
-        { text: "🔄 Спочатку", callback_data: "event:restart" },
+        { text: "✏️ Назва", callback_data: "cedit:title" },
+        { text: "🕒 Час", callback_data: "cedit:time" },
       ],
-      [{ text: "❌ Скасувати", callback_data: "event:cancel" }],
+      [
+        { text: "📅 Дата", callback_data: "cedit:date" },
+        { text: "📝 Опис", callback_data: "cedit:desc" },
+      ],
+      [{ text: "⏰ Нагадування", callback_data: "cedit:rem" }],
+      [
+        { text: "🔄 Спочатку", callback_data: "event:restart" },
+        { text: "❌ Скасувати", callback_data: "event:cancel" },
+      ],
+    ],
+  };
+}
+
+function eventEditKb() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✏️ Назва", callback_data: "eedit:title" },
+        { text: "🕒 Час", callback_data: "eedit:time" },
+      ],
+      [
+        { text: "📅 Дата", callback_data: "eedit:date" },
+        { text: "📝 Опис", callback_data: "eedit:desc" },
+      ],
+      [{ text: "⏰ Нагадування перед подією", callback_data: "eedit:rem" }],
+      [{ text: "« До списку", callback_data: "evlist" }],
+    ],
+  };
+}
+
+function eventsListKb(events: CalendarEvent[]) {
+  return {
+    inline_keyboard: [
+      ...events.slice(0, 10).map((e, i) => [{
+        text: `✏️ ${i + 1}. ${e.summary.slice(0, 28)}`,
+        callback_data: `evopen:${i}`,
+      }]),
+    ],
+  };
+}
+
+function draftRemindersKb(mins: number[]) {
+  const rows = [
+    [{ text: "➕ Додати інтервал", callback_data: "drem:add" }],
+    ...mins.map((m) => [{
+      text: `🗑 За ${formatMinutes(m)}`,
+      callback_data: `drem:del:${m}`,
+    }]),
+    [{ text: "« Назад до події", callback_data: "cedit:back" }],
+  ];
+  return { inline_keyboard: rows };
+}
+
+function eventRemindersKb(mins: number[]) {
+  return {
+    inline_keyboard: [
+      [{ text: "➕ Додати інтервал", callback_data: "erem:add" }],
+      ...mins.map((m) => [{
+        text: `🗑 За ${formatMinutes(m)}`,
+        callback_data: `erem:del:${m}`,
+      }]),
+      [{
+        text: mins.length ? "↩️ Як у загальних налаштуваннях" : "✓ Загальні налаштування",
+        callback_data: "erem:reset",
+      }],
+      [{ text: "« Назад", callback_data: "eedit:back" }],
+    ],
+  };
+}
+
+function remAddPresetsKb(prefix: "drem" | "erem") {
+  const presets = [5, 15, 30, 60, 120, 1440] as const;
+  const labels: Record<number, string> = {
+    5: "5 хв",
+    15: "15 хв",
+    30: "30 хв",
+    60: "1 год",
+    120: "2 год",
+    1440: "1 день",
+  };
+  return {
+    inline_keyboard: [
+      presets.slice(0, 3).map((m) => ({
+        text: labels[m],
+        callback_data: `${prefix}:set:${m}`,
+      })),
+      presets.slice(3).map((m) => ({
+        text: labels[m],
+        callback_data: `${prefix}:set:${m}`,
+      })),
+      [{ text: "✏️ Свій…", callback_data: `${prefix}:custom` }],
+      [{
+        text: "« Назад",
+        callback_data: prefix === "drem" ? "cedit:rem" : "eedit:rem",
+      }],
     ],
   };
 }
@@ -261,6 +364,72 @@ async function startCreateFlow(
   );
 }
 
+async function sendEventsList(
+  db: ReturnType<typeof adminClient>,
+  chatId: number,
+  user: { telegram_id: number; timezone: string; google_refresh_token: string | null },
+  opts: { editMessageId?: number } = {},
+) {
+  const events = await listUpcoming(db, user as Parameters<typeof listUpcoming>[1]);
+  if (!events.length) {
+    const text =
+      "На найближчі 7 днів подій немає.\nСтвори нову кнопкою ➕ Нова подія.";
+    if (opts.editMessageId) {
+      await editMessageText(chatId, opts.editMessageId, text);
+    }
+    await sendMessage(chatId, text, { reply_markup: mainKeyboard(true) });
+    await clearSession(db, user.telegram_id);
+    return;
+  }
+  const lines = ["<b>Найближчі події</b>\nНатисни ✏️ щоб редагувати:\n"];
+  events.forEach((e, i) => {
+    const loc = e.location ? `\n   📍 ${e.location}` : "";
+    const desc = e.description ? `\n   📝 ${escapeHtml(e.description.slice(0, 80))}` : "";
+    lines.push(
+      `${i + 1}. <b>${escapeHtml(e.summary)}</b>\n   🕒 ${
+        formatWhen(e, user.timezone)
+      }${loc}${desc}`,
+    );
+  });
+  await setSession(db, user.telegram_id, "events_list", {
+    listIds: events.map((e) => e.id),
+  });
+  const text = lines.join("\n\n");
+  if (opts.editMessageId) {
+    await editMessageText(chatId, opts.editMessageId, text, {
+      reply_markup: eventsListKb(events),
+    });
+  } else {
+    await sendMessage(chatId, text, { reply_markup: eventsListKb(events) });
+  }
+}
+
+async function showEventRemindersScreen(
+  db: ReturnType<typeof adminClient>,
+  chatId: number,
+  user: { telegram_id: number; timezone: string },
+  event: CalendarEvent,
+  opts: { editMessageId?: number } = {},
+) {
+  const mins = await listEventReminders(db, user.telegram_id, event.id);
+  const text =
+    `<b>Нагадування перед подією</b>\n📌 ${escapeHtml(event.summary)}\n\n` +
+    (mins.length
+      ? mins.map((m, i) => `${i + 1}. за ${formatMinutes(m)}`).join("\n")
+      : "Зараз: <i>загальні налаштування акаунта</i>");
+  await setSession(db, user.telegram_id, "edit_event", {
+    eventId: event.id,
+    listIds: (await getSession(db, user.telegram_id))?.data?.listIds || [],
+  });
+  if (opts.editMessageId) {
+    await editMessageText(chatId, opts.editMessageId, text, {
+      reply_markup: eventRemindersKb(mins),
+    });
+  } else {
+    await sendMessage(chatId, text, { reply_markup: eventRemindersKb(mins) });
+  }
+}
+
 async function askTime(
   db: ReturnType<typeof adminClient>,
   chatId: number,
@@ -296,34 +465,124 @@ async function askTitle(
   );
 }
 
+function buildDraftFromData(
+  data: Record<string, unknown>,
+  timezone: string,
+) {
+  const ymd = data.ymd as Ymd;
+  const hour = Number(data.hour);
+  const minute = Number(data.minute);
+  const title = String(data.title || "Подія");
+  const description = data.description ? String(data.description) : "";
+  const durationMin = Number(data.durationMin || 60);
+  const start = toIsoLocal(ymd, hour, minute, timezone);
+  const endTotal = hour * 60 + minute + durationMin;
+  const endDayAdd = Math.floor(endTotal / (24 * 60));
+  const endMins = endTotal % (24 * 60);
+  const endHour = Math.floor(endMins / 60);
+  const endMinute = endMins % 60;
+  const endYmd = endDayAdd ? addDaysYmd(ymd, endDayAdd) : ymd;
+  const end = toIsoLocal(endYmd, endHour, endMinute, timezone);
+  return {
+    summary: title,
+    start,
+    end,
+    description: description || null,
+  };
+}
+
+function confirmText(data: Record<string, unknown>, timezone: string) {
+  const ymd = data.ymd as Ymd;
+  const hour = Number(data.hour);
+  const minute = Number(data.minute);
+  const title = String(data.title || "Подія");
+  const description = data.description ? String(data.description) : "";
+  const reminders = (data.reminders as number[] | undefined) || [];
+  const remLine = reminders.length
+    ? reminders.map((m) => `за ${formatMinutes(m)}`).join(", ")
+    : "як у загальних налаштуваннях";
+  const descLine = description
+    ? `\n📝 ${escapeHtml(description)}`
+    : "\n📝 <i>без опису</i>";
+  void timezone;
+  return (
+    `<b>Перевір подію</b>\n\n` +
+    `📌 ${escapeHtml(title)}\n` +
+    `📅 ${formatYmd(ymd)}\n` +
+    `🕒 ${String(hour).padStart(2, "0")}:${
+      String(minute).padStart(2, "0")
+    }${descLine}\n` +
+    `⏰ Нагадування: ${remLine}\n\n` +
+    `Можеш відредагувати поля кнопками нижче або створити.`
+  );
+}
+
 async function showConfirm(
   db: ReturnType<typeof adminClient>,
   chatId: number,
   telegramId: number,
   timezone: string,
   data: Record<string, unknown>,
+  opts: { editMessageId?: number } = {},
 ) {
-  const ymd = data.ymd as Ymd;
-  const hour = Number(data.hour);
-  const minute = Number(data.minute);
-  const title = String(data.title || "Подія");
-  const start = toIsoLocal(ymd, hour, minute, timezone);
-  const endHour = hour + 1;
-  const endIso = endHour < 24
-    ? toIsoLocal(ymd, endHour, minute, timezone)
-    : toIsoLocal(addDaysYmd(ymd, 1), endHour - 24, minute, timezone);
+  const draft = buildDraftFromData(data, timezone);
+  const payload = {
+    ...data,
+    durationMin: Number(data.durationMin || 60),
+    reminders: (data.reminders as number[]) || [],
+    draft,
+  };
+  await setSession(db, telegramId, "create_confirm", payload);
+  const text = confirmText(payload, timezone);
+  if (opts.editMessageId) {
+    await editMessageText(chatId, opts.editMessageId, text, {
+      reply_markup: confirmKb(),
+    });
+  } else {
+    await sendMessage(chatId, text, { reply_markup: confirmKb() });
+  }
+}
 
-  const draft = { summary: title, start, end: endIso };
-  await setSession(db, telegramId, "create_confirm", { ...data, draft });
-  await sendMessage(
-    chatId,
-    `<b>Перевір подію</b>\n\n` +
-      `📌 ${escapeHtml(title)}\n` +
-      `📅 ${formatYmd(ymd)}\n` +
-      `🕒 ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}\n\n` +
-      `Створити в Google Calendar?`,
-    { reply_markup: confirmKb() },
-  );
+async function showExistingEdit(
+  db: ReturnType<typeof adminClient>,
+  chatId: number,
+  user: { telegram_id: number; timezone: string },
+  event: CalendarEvent,
+  opts: { editMessageId?: number; listIds?: string[] } = {},
+) {
+  const prev = await getSession(db, user.telegram_id);
+  const listIds = opts.listIds ??
+    (prev?.data?.listIds as string[] | undefined) ??
+    [];
+  const parts = eventCivilParts(event, user.timezone);
+  const rem = await listEventReminders(db, user.telegram_id, event.id);
+  const remLine = rem.length
+    ? rem.map((m) => `за ${formatMinutes(m)}`).join(", ")
+    : "як у загальних налаштуваннях";
+  const desc = event.description
+    ? `\n📝 ${escapeHtml(event.description)}`
+    : "\n📝 <i>без опису</i>";
+  const text =
+    `<b>Редагування події</b>\n\n` +
+    `📌 ${escapeHtml(event.summary)}\n` +
+    `📅 ${formatYmd(parts.ymd)}\n` +
+    `🕒 ${String(parts.hour).padStart(2, "0")}:${
+      String(parts.minute).padStart(2, "0")
+    }${desc}\n` +
+    `⏰ Нагадування: ${remLine}`;
+
+  await setSession(db, user.telegram_id, "edit_event", {
+    eventId: event.id,
+    listIds,
+  });
+
+  if (opts.editMessageId) {
+    await editMessageText(chatId, opts.editMessageId, text, {
+      reply_markup: eventEditKb(),
+    });
+  } else {
+    await sendMessage(chatId, text, { reply_markup: eventEditKb() });
+  }
 }
 
 async function handleMessage(
@@ -390,27 +649,7 @@ async function handleMessage(
       return;
     }
     try {
-      const events = await listUpcoming(db, user);
-      if (!events.length) {
-        await sendMessage(
-          chatId,
-          "На найближчі 7 днів подій немає.\nСтвори нову кнопкою ➕ Нова подія.",
-          { reply_markup: mainKeyboard(true) },
-        );
-        return;
-      }
-      const lines = ["<b>Найближчі події</b>\n"];
-      events.forEach((e, i) => {
-        const loc = e.location ? `\n   📍 ${e.location}` : "";
-        lines.push(
-          `${i + 1}. <b>${escapeHtml(e.summary)}</b>\n   🕒 ${
-            formatWhen(e, user.timezone)
-          }${loc}`,
-        );
-      });
-      await sendMessage(chatId, lines.join("\n\n"), {
-        reply_markup: mainKeyboard(true),
-      });
+      await sendEventsList(db, chatId, user);
     } catch (e) {
       await sendMessage(chatId, `Не вдалося отримати події: ${e}`);
     }
@@ -450,7 +689,14 @@ async function handleMessage(
   if (session?.state === "create_date_custom") {
     try {
       const ymd = parseDateText(text, user.timezone);
-      await askTime(db, chatId, user.telegram_id, ymd, session.data || {});
+      if (session.data?.returnTo === "create_confirm") {
+        await showConfirm(db, chatId, user.telegram_id, user.timezone, {
+          ...(session.data || {}),
+          ymd,
+        });
+      } else {
+        await askTime(db, chatId, user.telegram_id, ymd, session.data || {});
+      }
     } catch (e) {
       await sendMessage(chatId, String(e));
     }
@@ -462,12 +708,12 @@ async function handleMessage(
       const { hour, minute } = parseTimeText(text);
       const time =
         `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-      await askTitle(db, chatId, user.telegram_id, {
-        ...(session.data || {}),
-        hour,
-        minute,
-        time,
-      });
+      const next = { ...(session.data || {}), hour, minute, time };
+      if (session.data?.returnTo === "create_confirm") {
+        await showConfirm(db, chatId, user.telegram_id, user.timezone, next);
+      } else {
+        await askTitle(db, chatId, user.telegram_id, next);
+      }
     } catch (e) {
       await sendMessage(chatId, String(e));
     }
@@ -484,6 +730,145 @@ async function handleMessage(
       ...(session.data || {}),
       title,
     });
+    return;
+  }
+
+  if (session?.state === "create_edit_title") {
+    const title = text.replace(/\s+/g, " ").trim();
+    if (!title) {
+      await sendMessage(chatId, "Назва не може бути порожньою.");
+      return;
+    }
+    await showConfirm(db, chatId, user.telegram_id, user.timezone, {
+      ...(session.data || {}),
+      title,
+    });
+    return;
+  }
+
+  if (session?.state === "create_edit_desc") {
+    const description = text === "-" ? "" : text.trim();
+    await showConfirm(db, chatId, user.telegram_id, user.timezone, {
+      ...(session.data || {}),
+      description,
+    });
+    return;
+  }
+
+  if (session?.state === "drem_custom") {
+    try {
+      const minutes = parseBeforeText(text);
+      const cur = ((session.data?.reminders as number[]) || []);
+      const reminders = [...new Set([...cur, minutes])].sort((a, b) => a - b);
+      await showConfirm(db, chatId, user.telegram_id, user.timezone, {
+        ...(session.data || {}),
+        reminders,
+      });
+    } catch (e) {
+      await sendMessage(chatId, String(e));
+    }
+    return;
+  }
+
+  if (session?.state === "edit_title") {
+    const title = text.replace(/\s+/g, " ").trim();
+    if (!title) {
+      await sendMessage(chatId, "Назва не може бути порожньою.");
+      return;
+    }
+    try {
+      const eventId = String(session.data?.eventId || "");
+      const updated = await updateEvent(db, user, eventId, { summary: title });
+      await sendMessage(chatId, "Назву оновлено ✓", {
+        reply_markup: mainKeyboard(true),
+      });
+      await showExistingEdit(db, chatId, user, updated);
+    } catch (e) {
+      await sendMessage(chatId, `Помилка: ${e}`);
+    }
+    return;
+  }
+
+  if (session?.state === "edit_desc") {
+    try {
+      const eventId = String(session.data?.eventId || "");
+      const description = text === "-" ? "" : text.trim();
+      const updated = await updateEvent(db, user, eventId, { description });
+      await sendMessage(chatId, "Опис оновлено ✓", {
+        reply_markup: mainKeyboard(true),
+      });
+      await showExistingEdit(db, chatId, user, updated);
+    } catch (e) {
+      await sendMessage(chatId, `Помилка: ${e}`);
+    }
+    return;
+  }
+
+  if (session?.state === "edit_time") {
+    try {
+      const { hour, minute } = parseTimeText(text);
+      const eventId = String(session.data?.eventId || "");
+      const event = await getEvent(db, user, eventId);
+      const parts = eventCivilParts(event, user.timezone);
+      const start = toIsoLocal(parts.ymd, hour, minute, user.timezone);
+      const endTotal = hour * 60 + minute + parts.durationMin;
+      const endDayAdd = Math.floor(endTotal / (24 * 60));
+      const endMins = endTotal % (24 * 60);
+      const end = toIsoLocal(
+        endDayAdd ? addDaysYmd(parts.ymd, endDayAdd) : parts.ymd,
+        Math.floor(endMins / 60),
+        endMins % 60,
+        user.timezone,
+      );
+      const updated = await updateEvent(db, user, eventId, { start, end });
+      await sendMessage(chatId, "Час оновлено ✓", {
+        reply_markup: mainKeyboard(true),
+      });
+      await showExistingEdit(db, chatId, user, updated);
+    } catch (e) {
+      await sendMessage(chatId, String(e));
+    }
+    return;
+  }
+
+  if (session?.state === "edit_date_custom") {
+    try {
+      const ymd = parseDateText(text, user.timezone);
+      const eventId = String(session.data?.eventId || "");
+      const event = await getEvent(db, user, eventId);
+      const parts = eventCivilParts(event, user.timezone);
+      const start = toIsoLocal(ymd, parts.hour, parts.minute, user.timezone);
+      const endTotal = parts.hour * 60 + parts.minute + parts.durationMin;
+      const endDayAdd = Math.floor(endTotal / (24 * 60));
+      const endMins = endTotal % (24 * 60);
+      const end = toIsoLocal(
+        endDayAdd ? addDaysYmd(ymd, endDayAdd) : ymd,
+        Math.floor(endMins / 60),
+        endMins % 60,
+        user.timezone,
+      );
+      const updated = await updateEvent(db, user, eventId, { start, end });
+      await sendMessage(chatId, "Дату оновлено ✓", {
+        reply_markup: mainKeyboard(true),
+      });
+      await showExistingEdit(db, chatId, user, updated);
+    } catch (e) {
+      await sendMessage(chatId, String(e));
+    }
+    return;
+  }
+
+  if (session?.state === "erem_custom") {
+    try {
+      const minutes = parseBeforeText(text);
+      const eventId = String(session.data?.eventId || "");
+      await addEventReminder(db, user.telegram_id, eventId, minutes);
+      const event = await getEvent(db, user, eventId);
+      await sendMessage(chatId, `Додано нагадування за ${formatMinutes(minutes)}`);
+      await showEventRemindersScreen(db, chatId, user, event);
+    } catch (e) {
+      await sendMessage(chatId, String(e));
+    }
     return;
   }
 
@@ -764,12 +1149,29 @@ async function handleCallback(
     return;
   }
 
-  // --- create event date ---
+  // --- create / edit date picker ---
   if (data.startsWith("date:")) {
+    const session = await getSession(db, user.telegram_id);
     const resolved = await resolveDateCallback(data, user.timezone);
     await answerCallback(cq.id);
     if (resolved === "custom") {
-      await setSession(db, user.telegram_id, "create_date_custom", {});
+      const returnTo = session?.state === "edit_event" ||
+          session?.data?.returnTo === "edit_event"
+        ? "edit_event"
+        : session?.state === "create_confirm" ||
+            session?.data?.returnTo === "create_confirm"
+        ? "create_confirm"
+        : undefined;
+      if (returnTo === "edit_event") {
+        await setSession(db, user.telegram_id, "edit_date_custom", {
+          ...(session?.data || {}),
+        });
+      } else {
+        await setSession(db, user.telegram_id, "create_date_custom", {
+          ...(session?.data || {}),
+          returnTo,
+        });
+      }
       await sendMessage(
         chatId,
         "Напиши дату:\n<code>20.07</code> або <code>20.07.2026</code>",
@@ -778,6 +1180,45 @@ async function handleCallback(
       return;
     }
     if (resolved) {
+      if (session?.state === "edit_event" || session?.data?.pickingDateFor === "edit") {
+        try {
+          const eventId = String(session?.data?.eventId || "");
+          const event = await getEvent(db, user, eventId);
+          const parts = eventCivilParts(event, user.timezone);
+          const start = toIsoLocal(
+            resolved,
+            parts.hour,
+            parts.minute,
+            user.timezone,
+          );
+          const endTotal = parts.hour * 60 + parts.minute + parts.durationMin;
+          const endDayAdd = Math.floor(endTotal / (24 * 60));
+          const endMins = endTotal % (24 * 60);
+          const end = toIsoLocal(
+            endDayAdd ? addDaysYmd(resolved, endDayAdd) : resolved,
+            Math.floor(endMins / 60),
+            endMins % 60,
+            user.timezone,
+          );
+          const updated = await updateEvent(db, user, eventId, { start, end });
+          await showExistingEdit(db, chatId, user, updated, {
+            editMessageId: messageId,
+          });
+        } catch (e) {
+          await sendMessage(chatId, `Помилка: ${e}`);
+        }
+        return;
+      }
+      if (
+        session?.state === "create_confirm" ||
+        session?.data?.returnTo === "create_confirm"
+      ) {
+        await showConfirm(db, chatId, user.telegram_id, user.timezone, {
+          ...(session?.data || {}),
+          ymd: resolved,
+        }, { editMessageId: messageId });
+        return;
+      }
       if (messageId) {
         await editMessageText(
           chatId,
@@ -805,19 +1246,168 @@ async function handleCallback(
     return;
   }
 
+  // --- draft edit (before create) ---
+  if (data === "cedit:back") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await showConfirm(
+      db,
+      chatId,
+      user.telegram_id,
+      user.timezone,
+      session?.data || {},
+      { editMessageId: messageId },
+    );
+    return;
+  }
+
+  if (data === "cedit:title") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await setSession(db, user.telegram_id, "create_edit_title", session?.data || {});
+    await sendMessage(chatId, "Нова назва події:", {
+      reply_markup: cancelKeyboard(),
+    });
+    return;
+  }
+
+  if (data === "cedit:time") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await setSession(db, user.telegram_id, "create_time", {
+      ...(session?.data || {}),
+      returnTo: "create_confirm",
+    });
+    await sendMessage(
+      chatId,
+      "Новий час (`15`, `15:00`, `8 30`):",
+      { reply_markup: cancelKeyboard() },
+    );
+    return;
+  }
+
+  if (data === "cedit:date") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await setSession(db, user.telegram_id, "create_confirm", {
+      ...(session?.data || {}),
+      returnTo: "create_confirm",
+    });
+    if (messageId) {
+      await editMessageText(chatId, messageId, "Обери нову дату:", {
+        reply_markup: dateKeyboard(),
+      });
+    }
+    return;
+  }
+
+  if (data === "cedit:desc") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await setSession(db, user.telegram_id, "create_edit_desc", session?.data || {});
+    await sendMessage(
+      chatId,
+      "Напиши опис події.\nЩоб очистити опис — надішли <code>-</code>",
+      { reply_markup: cancelKeyboard() },
+    );
+    return;
+  }
+
+  if (data === "cedit:rem") {
+    const session = await getSession(db, user.telegram_id);
+    const reminders = (session?.data?.reminders as number[]) || [];
+    await answerCallback(cq.id);
+    const text =
+      `<b>Нагадування для цієї події</b>\n` +
+      (reminders.length
+        ? reminders.map((m, i) => `${i + 1}. за ${formatMinutes(m)}`).join("\n")
+        : "Зараз: <i>загальні налаштування</i>");
+    if (messageId) {
+      await editMessageText(chatId, messageId, text, {
+        reply_markup: draftRemindersKb(reminders),
+      });
+    }
+    return;
+  }
+
+  if (data === "drem:add") {
+    await answerCallback(cq.id);
+    if (messageId) {
+      await editMessageText(chatId, messageId, "За скільки нагадати?", {
+        reply_markup: remAddPresetsKb("drem"),
+      });
+    }
+    return;
+  }
+
+  if (data.startsWith("drem:set:")) {
+    const minutes = Number(data.split(":")[2]);
+    const session = await getSession(db, user.telegram_id);
+    const cur = ((session?.data?.reminders as number[]) || []);
+    const reminders = [...new Set([...cur, minutes])].sort((a, b) => a - b);
+    await answerCallback(cq.id, "Додано");
+    await setSession(db, user.telegram_id, "create_confirm", {
+      ...(session?.data || {}),
+      reminders,
+      draft: buildDraftFromData({ ...(session?.data || {}), reminders }, user.timezone),
+    });
+    const text =
+      `<b>Нагадування для цієї події</b>\n` +
+      reminders.map((m, i) => `${i + 1}. за ${formatMinutes(m)}`).join("\n");
+    if (messageId) {
+      await editMessageText(chatId, messageId, text, {
+        reply_markup: draftRemindersKb(reminders),
+      });
+    }
+    return;
+  }
+
+  if (data.startsWith("drem:del:")) {
+    const minutes = Number(data.split(":")[2]);
+    const session = await getSession(db, user.telegram_id);
+    const reminders = ((session?.data?.reminders as number[]) || [])
+      .filter((m) => m !== minutes);
+    await answerCallback(cq.id, "Видалено");
+    await setSession(db, user.telegram_id, "create_confirm", {
+      ...(session?.data || {}),
+      reminders,
+      draft: buildDraftFromData({ ...(session?.data || {}), reminders }, user.timezone),
+    });
+    const text =
+      `<b>Нагадування для цієї події</b>\n` +
+      (reminders.length
+        ? reminders.map((m, i) => `${i + 1}. за ${formatMinutes(m)}`).join("\n")
+        : "Зараз: <i>загальні налаштування</i>");
+    if (messageId) {
+      await editMessageText(chatId, messageId, text, {
+        reply_markup: draftRemindersKb(reminders),
+      });
+    }
+    return;
+  }
+
+  if (data === "drem:custom") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await setSession(db, user.telegram_id, "drem_custom", session?.data || {});
+    await sendMessage(
+      chatId,
+      "Інтервал: <code>30</code>, <code>2 год</code>, <code>1 день</code>",
+      { reply_markup: cancelKeyboard() },
+    );
+    return;
+  }
+
   if (data === "event:confirm") {
     const session = await getSession(db, user.telegram_id);
-    const draft = session?.data?.draft as {
-      summary: string;
-      start: string;
-      end: string;
-    } | undefined;
-    if (!draft) {
-      await answerCallback(cq.id, "Немає даних");
-      return;
-    }
+    const dataObj = session?.data || {};
+    const draft = buildDraftFromData(dataObj, user.timezone);
     try {
       const created = await createEvent(db, user, draft);
+      const reminders = (dataObj.reminders as number[]) || [];
+      if (reminders.length) {
+        await setEventReminders(db, user.telegram_id, created.id, reminders);
+      }
       await clearSession(db, user.telegram_id);
       await answerCallback(cq.id, "Готово");
       const link = created.htmlLink
@@ -832,13 +1422,9 @@ async function handleCallback(
           }${link}`,
         );
       }
-      const rules = await listReminderRules(db, user.telegram_id);
-      const before = rules.filter((r) => r.kind === "before");
-      const remLine = before.length
-        ? `Нагадування: ${
-          before.map((r) => `за ${formatMinutes(r.minutes_before || 0)}`).join(", ")
-        }.`
-        : "Нагадувань «до події» немає — додай у ⏰ Нагадування.";
+      const remLine = reminders.length
+        ? `Нагадування: ${reminders.map((m) => `за ${formatMinutes(m)}`).join(", ")}.`
+        : "Нагадування: як у загальних налаштуваннях.";
       await sendMessage(chatId, remLine, {
         reply_markup: mainKeyboard(true),
       });
@@ -846,5 +1432,185 @@ async function handleCallback(
       await answerCallback(cq.id, "Помилка");
       await sendMessage(chatId, `Не вдалося створити подію: ${e}`);
     }
+    return;
+  }
+
+  // --- existing event edit ---
+  if (data === "evlist") {
+    await answerCallback(cq.id);
+    try {
+      await sendEventsList(db, chatId, user, { editMessageId: messageId });
+    } catch (e) {
+      await sendMessage(chatId, `Помилка: ${e}`);
+    }
+    return;
+  }
+
+  if (data.startsWith("evopen:")) {
+    const idx = Number(data.split(":")[1]);
+    const session = await getSession(db, user.telegram_id);
+    const listIds = (session?.data?.listIds as string[]) || [];
+    const eventId = listIds[idx];
+    await answerCallback(cq.id);
+    if (!eventId) {
+      await sendMessage(chatId, "Подію не знайдено, відкрий список знову.");
+      return;
+    }
+    try {
+      const event = await getEvent(db, user, eventId);
+      await showExistingEdit(db, chatId, user, event, {
+        editMessageId: messageId,
+        listIds,
+      });
+    } catch (e) {
+      await sendMessage(chatId, `Помилка: ${e}`);
+    }
+    return;
+  }
+
+  if (data === "eedit:back") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    try {
+      const event = await getEvent(db, user, String(session?.data?.eventId));
+      await showExistingEdit(db, chatId, user, event, {
+        editMessageId: messageId,
+      });
+    } catch (e) {
+      await sendMessage(chatId, `Помилка: ${e}`);
+    }
+    return;
+  }
+
+  if (data === "eedit:title") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await setSession(db, user.telegram_id, "edit_title", session?.data || {});
+    await sendMessage(chatId, "Нова назва:", { reply_markup: cancelKeyboard() });
+    return;
+  }
+
+  if (data === "eedit:time") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await setSession(db, user.telegram_id, "edit_time", session?.data || {});
+    await sendMessage(
+      chatId,
+      "Новий час (`15`, `15:00`, `8 30`):",
+      { reply_markup: cancelKeyboard() },
+    );
+    return;
+  }
+
+  if (data === "eedit:date") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await setSession(db, user.telegram_id, "edit_event", {
+      ...(session?.data || {}),
+      pickingDateFor: "edit",
+    });
+    if (messageId) {
+      await editMessageText(chatId, messageId, "Обери нову дату:", {
+        reply_markup: dateKeyboard(),
+      });
+    }
+    return;
+  }
+
+  if (data === "eedit:desc") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await setSession(db, user.telegram_id, "edit_desc", session?.data || {});
+    await sendMessage(
+      chatId,
+      "Новий опис (або <code>-</code> щоб очистити):",
+      { reply_markup: cancelKeyboard() },
+    );
+    return;
+  }
+
+  if (data === "eedit:rem") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    try {
+      const event = await getEvent(db, user, String(session?.data?.eventId));
+      await showEventRemindersScreen(db, chatId, user, event, {
+        editMessageId: messageId,
+      });
+    } catch (e) {
+      await sendMessage(chatId, `Помилка: ${e}`);
+    }
+    return;
+  }
+
+  if (data === "erem:add") {
+    await answerCallback(cq.id);
+    if (messageId) {
+      await editMessageText(chatId, messageId, "За скільки нагадати?", {
+        reply_markup: remAddPresetsKb("erem"),
+      });
+    }
+    return;
+  }
+
+  if (data.startsWith("erem:set:")) {
+    const minutes = Number(data.split(":")[2]);
+    const session = await getSession(db, user.telegram_id);
+    const eventId = String(session?.data?.eventId || "");
+    await addEventReminder(db, user.telegram_id, eventId, minutes);
+    await answerCallback(cq.id, "Додано");
+    try {
+      const event = await getEvent(db, user, eventId);
+      await showEventRemindersScreen(db, chatId, user, event, {
+        editMessageId: messageId,
+      });
+    } catch (e) {
+      await sendMessage(chatId, `Помилка: ${e}`);
+    }
+    return;
+  }
+
+  if (data.startsWith("erem:del:")) {
+    const minutes = Number(data.split(":")[2]);
+    const session = await getSession(db, user.telegram_id);
+    const eventId = String(session?.data?.eventId || "");
+    await removeEventReminder(db, user.telegram_id, eventId, minutes);
+    await answerCallback(cq.id, "Видалено");
+    try {
+      const event = await getEvent(db, user, eventId);
+      await showEventRemindersScreen(db, chatId, user, event, {
+        editMessageId: messageId,
+      });
+    } catch (e) {
+      await sendMessage(chatId, `Помилка: ${e}`);
+    }
+    return;
+  }
+
+  if (data === "erem:reset") {
+    const session = await getSession(db, user.telegram_id);
+    const eventId = String(session?.data?.eventId || "");
+    await setEventReminders(db, user.telegram_id, eventId, []);
+    await answerCallback(cq.id, "Скинуто");
+    try {
+      const event = await getEvent(db, user, eventId);
+      await showEventRemindersScreen(db, chatId, user, event, {
+        editMessageId: messageId,
+      });
+    } catch (e) {
+      await sendMessage(chatId, `Помилка: ${e}`);
+    }
+    return;
+  }
+
+  if (data === "erem:custom") {
+    const session = await getSession(db, user.telegram_id);
+    await answerCallback(cq.id);
+    await setSession(db, user.telegram_id, "erem_custom", session?.data || {});
+    await sendMessage(
+      chatId,
+      "Інтервал: <code>30</code>, <code>2 год</code>, <code>1 день</code>",
+      { reply_markup: cancelKeyboard() },
+    );
   }
 }

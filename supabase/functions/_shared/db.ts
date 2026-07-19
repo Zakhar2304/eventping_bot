@@ -241,3 +241,86 @@ async function syncLegacyReminderMinutes(
     await updateUser(db, telegramId, { reminder_minutes: first.minutes_before });
   }
 }
+
+export async function listEventReminders(
+  db: SupabaseClient,
+  telegramId: number,
+  eventId: string,
+): Promise<number[]> {
+  const { data, error } = await db
+    .from("event_reminders")
+    .select("minutes_before")
+    .eq("telegram_id", telegramId)
+    .eq("event_id", eventId)
+    .order("minutes_before", { ascending: true });
+  if (error) throw error;
+  return ((data || []) as Array<{ minutes_before: number }>).map((r) =>
+    r.minutes_before
+  );
+}
+
+export async function listAllEventReminderMap(
+  db: SupabaseClient,
+  telegramId: number,
+): Promise<Record<string, number[]>> {
+  const { data, error } = await db
+    .from("event_reminders")
+    .select("event_id, minutes_before")
+    .eq("telegram_id", telegramId);
+  if (error) throw error;
+  const map: Record<string, number[]> = {};
+  for (const row of data || []) {
+    const id = String(row.event_id);
+    if (!map[id]) map[id] = [];
+    map[id].push(Number(row.minutes_before));
+  }
+  return map;
+}
+
+export async function setEventReminders(
+  db: SupabaseClient,
+  telegramId: number,
+  eventId: string,
+  minutesList: number[],
+) {
+  await db.from("event_reminders").delete()
+    .eq("telegram_id", telegramId)
+    .eq("event_id", eventId);
+  const unique = [...new Set(minutesList.filter((m) => m > 0))];
+  if (!unique.length) return;
+  const { error } = await db.from("event_reminders").insert(
+    unique.map((minutes_before) => ({
+      telegram_id: telegramId,
+      event_id: eventId,
+      minutes_before,
+    })),
+  );
+  if (error) throw error;
+}
+
+export async function addEventReminder(
+  db: SupabaseClient,
+  telegramId: number,
+  eventId: string,
+  minutes: number,
+) {
+  const { error } = await db.from("event_reminders").upsert({
+    telegram_id: telegramId,
+    event_id: eventId,
+    minutes_before: minutes,
+  }, { onConflict: "telegram_id,event_id,minutes_before" });
+  if (error) throw error;
+}
+
+export async function removeEventReminder(
+  db: SupabaseClient,
+  telegramId: number,
+  eventId: string,
+  minutes: number,
+) {
+  const { error } = await db.from("event_reminders").delete()
+    .eq("telegram_id", telegramId)
+    .eq("event_id", eventId)
+    .eq("minutes_before", minutes);
+  if (error) throw error;
+}

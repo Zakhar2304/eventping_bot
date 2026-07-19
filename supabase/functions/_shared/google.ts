@@ -12,6 +12,7 @@ export type CalendarEvent = {
   start: Date;
   end: Date;
   location?: string;
+  description?: string;
   htmlLink?: string;
   allDay: boolean;
 };
@@ -115,6 +116,7 @@ function parseEvent(raw: Record<string, unknown>, tz: string): CalendarEvent | n
       start,
       end,
       location: raw.location ? String(raw.location) : undefined,
+      description: raw.description ? String(raw.description) : undefined,
       htmlLink: raw.htmlLink ? String(raw.htmlLink) : undefined,
       allDay,
     };
@@ -183,15 +185,18 @@ export async function listUpcoming(
     .filter((e): e is CalendarEvent => !!e);
 }
 
+export type EventDraft = {
+  summary: string;
+  start: string;
+  end: string;
+  location?: string | null;
+  description?: string | null;
+};
+
 export async function createEvent(
   db: SupabaseClient,
   user: DbUser,
-  draft: {
-    summary: string;
-    start: string;
-    end: string;
-    location?: string | null;
-  },
+  draft: EventDraft,
 ): Promise<CalendarEvent> {
   const token = await refreshAccessToken(db, user);
   const body: Record<string, unknown> = {
@@ -200,6 +205,7 @@ export async function createEvent(
     end: { dateTime: draft.end, timeZone: user.timezone },
   };
   if (draft.location) body.location = draft.location;
+  if (draft.description) body.description = draft.description;
 
   const res = await fetch(
     `https://www.googleapis.com/calendar/v3/calendars/${
@@ -223,16 +229,115 @@ export async function createEvent(
   return parsed;
 }
 
+export async function getEvent(
+  db: SupabaseClient,
+  user: DbUser,
+  eventId: string,
+): Promise<CalendarEvent> {
+  const token = await refreshAccessToken(db, user);
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${
+      encodeURIComponent(user.calendar_id || "primary")
+    }/events/${encodeURIComponent(eventId)}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error(json.error?.message || "Get event failed");
+  }
+  const parsed = parseEvent(json, user.timezone);
+  if (!parsed) throw new Error("Не вдалося прочитати подію");
+  return parsed;
+}
+
+export async function updateEvent(
+  db: SupabaseClient,
+  user: DbUser,
+  eventId: string,
+  patch: Partial<EventDraft>,
+): Promise<CalendarEvent> {
+  const token = await refreshAccessToken(db, user);
+  const body: Record<string, unknown> = {};
+  if (patch.summary !== undefined) body.summary = patch.summary;
+  if (patch.description !== undefined) {
+    body.description = patch.description || "";
+  }
+  if (patch.location !== undefined) body.location = patch.location || "";
+  if (patch.start) {
+    body.start = { dateTime: patch.start, timeZone: user.timezone };
+  }
+  if (patch.end) {
+    body.end = { dateTime: patch.end, timeZone: user.timezone };
+  }
+
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/${
+      encodeURIComponent(user.calendar_id || "primary")
+    }/events/${encodeURIComponent(eventId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error(json.error?.message || "Update event failed");
+  }
+  const parsed = parseEvent(json, user.timezone);
+  if (!parsed) throw new Error("Не вдалося прочитати оновлену подію");
+  return parsed;
+}
+
+/** Civil date/time parts of an event in user timezone */
+export function eventCivilParts(event: CalendarEvent, timeZone: string) {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const startParts = Object.fromEntries(
+    fmt.formatToParts(event.start).map((p) => [p.type, p.value]),
+  );
+  const endParts = Object.fromEntries(
+    fmt.formatToParts(event.end).map((p) => [p.type, p.value]),
+  );
+  const ymd = {
+    y: Number(startParts.year),
+    m: Number(startParts.month),
+    d: Number(startParts.day),
+  };
+  const hour = Number(startParts.hour === "24" ? "0" : startParts.hour);
+  const minute = Number(startParts.minute);
+  const endH = Number(endParts.hour === "24" ? "0" : endParts.hour);
+  const endM = Number(endParts.minute);
+  let durationMin = (endH * 60 + endM) - (hour * 60 + minute);
+  if (durationMin <= 0) durationMin = 60;
+  return { ymd, hour, minute, durationMin };
+}
+
 export async function eventsNeedingReminder(
   db: SupabaseClient,
   user: DbUser,
   beforeMinutesList: number[],
   windowMinutes = 1,
+  perEventOffsets: Record<string, number[]> = {},
 ): Promise<Array<{ event: CalendarEvent; remindAt: Date; minutesBefore: number }>> {
-  const offsets = beforeMinutesList.length
+  const globalOffsets = beforeMinutesList.length
     ? beforeMinutesList
     : [user.reminder_minutes || 30];
-  const maxBefore = Math.max(...offsets);
+  const allOffsets = [
+    ...globalOffsets,
+    ...Object.values(perEventOffsets).flat(),
+  ];
+  const maxBefore = Math.max(30, ...allOffsets);
   const token = await refreshAccessToken(db, user);
   const now = new Date();
   const lookAhead = new Date(
@@ -261,6 +366,8 @@ export async function eventsNeedingReminder(
   for (const item of items) {
     const event = parseEvent(item, user.timezone);
     if (!event || event.allDay) continue;
+    const custom = perEventOffsets[event.id];
+    const offsets = custom?.length ? custom : globalOffsets;
     for (const minutesBefore of offsets) {
       const remindAt = new Date(event.start.getTime() - minutesBefore * 60_000);
       const deltaSec = (remindAt.getTime() - now.getTime()) / 1000;
