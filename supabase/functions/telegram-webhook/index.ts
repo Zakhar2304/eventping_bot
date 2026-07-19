@@ -56,8 +56,10 @@ import {
 const HELP =
   `<b>EventPing</b> — нагадування та події з Google Calendar.\n\n` +
   `<b>Нова подія:</b> дата → час → назва, далі можна відредагувати назву/час/дату/опис/нагадування.\n` +
-  `<b>Редагування:</b> 📅 Найближчі → ✏️ біля події.\n` +
+  `<b>Редагування:</b> кнопка <b>✏️ Редагувати подію</b> — усі події від сьогодні.\n` +
   `Час: <code>15</code>, <code>15:00</code>, <code>15 00</code>, <code>8:30</code>, <code>8 30</code>.`;
+
+const EDIT_PAGE_SIZE = 8;
 
 function connected(u: { google_refresh_token: string | null }) {
   return !!u.google_refresh_token;
@@ -109,15 +111,39 @@ function eventEditKb() {
   };
 }
 
-function eventsListKb(events: CalendarEvent[]) {
-  return {
-    inline_keyboard: [
-      ...events.slice(0, 10).map((e, i) => [{
-        text: `✏️ ${i + 1}. ${e.summary.slice(0, 28)}`,
-        callback_data: `evopen:${i}`,
-      }]),
-    ],
-  };
+function eventsListKb(
+  events: CalendarEvent[],
+  page: number,
+  total: number,
+) {
+  const pageSize = EDIT_PAGE_SIZE;
+  const start = page * pageSize;
+  const slice = events.slice(start, start + pageSize);
+  const rows = slice.map((e, i) => {
+    const idx = start + i;
+    const when = new Intl.DateTimeFormat("uk-UA", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(e.start);
+    return [{
+      text: `✏️ ${idx + 1}. ${when} ${e.summary.slice(0, 22)}`,
+      callback_data: `evopen:${idx}`,
+    }];
+  });
+  const nav: Array<{ text: string; callback_data: string }> = [];
+  if (page > 0) {
+    nav.push({ text: "‹ Назад", callback_data: `evpage:${page - 1}` });
+  }
+  const maxPage = Math.max(0, Math.ceil(total / pageSize) - 1);
+  if (page < maxPage) {
+    nav.push({ text: "Далі ›", callback_data: `evpage:${page + 1}` });
+  }
+  if (nav.length) rows.push(nav);
+  rows.push([{ text: "🔄 Оновити список", callback_data: "evlist" }]);
+  return { inline_keyboard: rows };
 }
 
 function draftRemindersKb(mins: number[]) {
@@ -352,40 +378,81 @@ async function startCreateFlow(
 async function sendEventsList(
   db: ReturnType<typeof adminClient>,
   chatId: number,
-  user: { telegram_id: number; timezone: string; google_refresh_token: string | null },
-  opts: { editMessageId?: number } = {},
+  user: Parameters<typeof listUpcoming>[1],
+  opts: {
+    editMessageId?: number;
+    page?: number;
+    mode?: "view" | "edit";
+    reuseIds?: string[];
+  } = {},
 ) {
-  const events = await listUpcoming(db, user as Parameters<typeof listUpcoming>[1]);
+  const mode = opts.mode ?? "edit";
+  const page = opts.page ?? 0;
+  const pageSize = EDIT_PAGE_SIZE;
+
+  let events: CalendarEvent[];
+  if (opts.reuseIds?.length && opts.page !== undefined) {
+    // Re-fetch full list to stay in sync, but keep paging
+    events = await listUpcoming(db, user, { days: 120, maxResults: 100 });
+  } else {
+    events = await listUpcoming(db, user, {
+      days: mode === "edit" ? 120 : 14,
+      maxResults: mode === "edit" ? 100 : 20,
+    });
+  }
+
   if (!events.length) {
     const text =
-      "На найближчі 7 днів подій немає.\nСтвори нову кнопкою ➕ Нова подія.";
+      "Подій від сьогодні немає.\nСтвори нову кнопкою ➕ Нова подія.";
     if (opts.editMessageId) {
       await editMessageText(chatId, opts.editMessageId, text);
+      await sendMessage(chatId, "Меню:", { reply_markup: mainKeyboard(true) });
+    } else {
+      await sendMessage(chatId, text, { reply_markup: mainKeyboard(true) });
     }
-    await sendMessage(chatId, text, { reply_markup: mainKeyboard(true) });
     await clearSession(db, user.telegram_id);
     return;
   }
-  const lines = ["<b>Найближчі події</b>\nНатисни ✏️ щоб редагувати:\n"];
-  events.forEach((e, i) => {
+
+  const total = events.length;
+  const maxPage = Math.max(0, Math.ceil(total / pageSize) - 1);
+  const safePage = Math.min(Math.max(0, page), maxPage);
+  const start = safePage * pageSize;
+  const slice = events.slice(start, start + pageSize);
+
+  const header = mode === "edit"
+    ? `<b>✏️ Редагування подій</b>\nУсі події від сьогодні (${total}). Обери подію:\n` +
+      `<i>Сторінка ${safePage + 1}/${maxPage + 1}</i>\n`
+    : `<b>📅 Найближчі події</b>\nНатисни ✏️ щоб редагувати:\n`;
+
+  const lines = [header];
+  slice.forEach((e, i) => {
+    const idx = start + i;
     const loc = e.location ? `\n   📍 ${e.location}` : "";
-    const desc = e.description ? `\n   📝 ${escapeHtml(e.description.slice(0, 80))}` : "";
+    const desc = e.description
+      ? `\n   📝 ${escapeHtml(e.description.slice(0, 60))}`
+      : "";
     lines.push(
-      `${i + 1}. <b>${escapeHtml(e.summary)}</b>\n   🕒 ${
+      `${idx + 1}. <b>${escapeHtml(e.summary)}</b>\n   🕒 ${
         formatWhen(e, user.timezone)
       }${loc}${desc}`,
     );
   });
+
   await setSession(db, user.telegram_id, "events_list", {
     listIds: events.map((e) => e.id),
+    page: safePage,
+    mode,
   });
+
   const text = lines.join("\n\n");
+  const kb = eventsListKb(events, safePage, total);
   if (opts.editMessageId) {
     await editMessageText(chatId, opts.editMessageId, text, {
-      reply_markup: eventsListKb(events),
+      reply_markup: kb,
     });
   } else {
-    await sendMessage(chatId, text, { reply_markup: eventsListKb(events) });
+    await sendMessage(chatId, text, { reply_markup: kb });
   }
 }
 
@@ -559,6 +626,8 @@ async function showExistingEdit(
   await setSession(db, user.telegram_id, "edit_event", {
     eventId: event.id,
     listIds,
+    mode: prev?.data?.mode || "edit",
+    page: prev?.data?.page || 0,
   });
 
   if (opts.editMessageId) {
@@ -634,7 +703,26 @@ async function handleMessage(
       return;
     }
     try {
-      await sendEventsList(db, chatId, user);
+      await sendEventsList(db, chatId, user, { mode: "view" });
+    } catch (e) {
+      await sendMessage(chatId, `Не вдалося отримати події: ${e}`);
+    }
+    return;
+  }
+
+  if (
+    text === "/edit" ||
+    text === "✏️ Редагувати подію" ||
+    text === "✏️ Редагувати"
+  ) {
+    if (!isConn) {
+      await sendMessage(chatId, "Спочатку підключи Google Calendar.", {
+        reply_markup: mainKeyboard(false),
+      });
+      return;
+    }
+    try {
+      await sendEventsList(db, chatId, user, { mode: "edit", page: 0 });
     } catch (e) {
       await sendMessage(chatId, `Не вдалося отримати події: ${e}`);
     }
@@ -1446,7 +1534,31 @@ async function handleCallback(
   if (data === "evlist") {
     await answerCallback(cq.id);
     try {
-      await sendEventsList(db, chatId, user, { editMessageId: messageId });
+      const session = await getSession(db, user.telegram_id);
+      const mode = (session?.data?.mode as "view" | "edit") || "edit";
+      const page = Number(session?.data?.page || 0);
+      await sendEventsList(db, chatId, user, {
+        editMessageId: messageId,
+        mode,
+        page,
+      });
+    } catch (e) {
+      await sendMessage(chatId, `Помилка: ${e}`);
+    }
+    return;
+  }
+
+  if (data.startsWith("evpage:")) {
+    const page = Number(data.split(":")[1] || 0);
+    await answerCallback(cq.id);
+    try {
+      const session = await getSession(db, user.telegram_id);
+      const mode = (session?.data?.mode as "view" | "edit") || "edit";
+      await sendEventsList(db, chatId, user, {
+        editMessageId: messageId,
+        mode,
+        page,
+      });
     } catch (e) {
       await sendMessage(chatId, `Помилка: ${e}`);
     }

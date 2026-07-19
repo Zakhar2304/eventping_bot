@@ -156,11 +156,18 @@ export function formatWhen(event: CalendarEvent, tz: string): string {
 export async function listUpcoming(
   db: SupabaseClient,
   user: DbUser,
-  days = 7,
+  daysOrOpts: number | { days?: number; maxResults?: number } = 7,
 ): Promise<CalendarEvent[]> {
+  const opts = typeof daysOrOpts === "number"
+    ? { days: daysOrOpts, maxResults: 12 }
+    : {
+      days: daysOrOpts.days ?? 7,
+      maxResults: daysOrOpts.maxResults ?? 12,
+    };
   const token = await refreshAccessToken(db, user);
   const now = new Date();
-  const timeMax = new Date(now.getTime() + days * 86400_000);
+  // Start of "today" already covered by timeMin=now; fetch far ahead
+  const timeMax = new Date(now.getTime() + opts.days * 86400_000);
   const url = new URL(
     `https://www.googleapis.com/calendar/v3/calendars/${
       encodeURIComponent(user.calendar_id || "primary")
@@ -170,7 +177,7 @@ export async function listUpcoming(
   url.searchParams.set("timeMax", timeMax.toISOString());
   url.searchParams.set("singleEvents", "true");
   url.searchParams.set("orderBy", "startTime");
-  url.searchParams.set("maxResults", "12");
+  url.searchParams.set("maxResults", String(Math.min(opts.maxResults, 250)));
 
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
