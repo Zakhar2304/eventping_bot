@@ -1,0 +1,13 @@
+project_id = "aulroejrprwekgepitiw"
+
+[api]
+enabled = true
+
+[functions.telegram-webhook]
+verify_jwt = false
+
+[functions.oauth-callback]
+verify_jwt = false
+
+[functions.reminders]
+verify_jwt = false
