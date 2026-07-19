@@ -12,3 +12,4 @@ credentials.json
 token.json
 client_secret*.json
 .DS_Store
+supabase/.temp/
