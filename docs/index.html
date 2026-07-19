@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EventPing</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      background: radial-gradient(1200px 600px at 20% -10%, #1d4ed833, transparent), var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 3rem 1.25rem 4rem;
+    }
+    h1 { font-size: 2.4rem; margin: 0 0 .5rem; letter-spacing: -0.03em; }
+    h2 { font-size: 1.2rem; margin: 2rem 0 .75rem; }
+    p, li { color: var(--muted); }
+    a { color: var(--accent); }
+    .card {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 1.25rem 1.4rem;
+      margin-top: 1.5rem;
+    }
+    .links { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; margin-top: 1.5rem; }
+    .cta {
+      display: inline-block;
+      margin-top: 1.5rem;
+      background: #0284c7;
+      color: white !important;
+      text-decoration: none;
+      padding: .7rem 1.1rem;
+      border-radius: 10px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>EventPing</h1>
+    <p>Telegram-бот для Google Calendar: нагадування про події та швидке створення записів.</p>
+
+    <a class="cta" href="https://t.me/eventping_bot">Відкрити бота в Telegram</a>
+
+    <div class="card">
+      <h2>Що робить EventPing</h2>
+      <ul>
+        <li>підключає ваш Google Calendar через безпечний OAuth;</li>
+        <li>показує найближчі події;</li>
+        <li>створює та редагує записи;</li>
+        <li>надсилає нагадування в Telegram.</li>
+      </ul>
+    </div>
+
+    <div class="links">
+      <a href="./privacy.html">Privacy Policy</a>
+      <a href="./terms.html">Terms of Service</a>
+      <a href="https://github.com/Zakhar2304/eventping_bot">GitHub</a>
+    </div>
+  </main>
+</body>
+</html>
