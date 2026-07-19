@@ -44,16 +44,13 @@ async function call(method: string, body: Record<string, unknown>) {
 export function mainKeyboard(connected: boolean) {
   return {
     keyboard: [
-      // зверху
       [{ text: "➕ Нова подія" }, { text: "✏️ Редагувати подію" }],
-      // посередині
       [{ text: "📅 Найближчі" }, { text: "⏰ Нагадування" }],
-      // знизу в два ряди
       [
         { text: connected ? "🔗 Календар ✓" : "🔗 Підключити календар" },
         { text: "ℹ️ Допомога" },
+        { text: "⚙️ Налаштування" },
       ],
-      [{ text: "⚙️ Налаштування" }],
     ],
     resize_keyboard: true,
   };
