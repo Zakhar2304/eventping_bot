@@ -1,22 +1,23 @@
-import { adminClient, clearSession, getUser, updateUser } from "../_shared/db.ts";
+import { adminClient, clearSession, getEnv, getUser, updateUser } from "../_shared/db.ts";
 import { exchangeCode } from "../_shared/google.ts";
 import { mainKeyboard, sendMessage } from "../_shared/telegram.ts";
 
-const OK_HTML = `<!doctype html>
-<html lang="uk"><head><meta charset="utf-8"/><title>EventPing</title>
-<style>
-body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
-.card{background:#1e293b;padding:2rem;border-radius:16px;text-align:center;max-width:420px}
-h1{margin:0 0 .5rem;font-size:1.4rem}p{margin:0;color:#94a3b8;line-height:1.5}
-</style></head><body><div class="card">
-<h1>Календар підключено</h1>
-<p>Можна закрити вкладку і повернутися в Telegram до EventPing.</p>
-</div></body></html>`;
+function botUrl(start?: string): string {
+  const username = getEnv("TELEGRAM_BOT_USERNAME", "eventping_bot").replace(
+    /^@/,
+    "",
+  );
+  const base = `https://t.me/${username}`;
+  return start ? `${base}?start=${encodeURIComponent(start)}` : base;
+}
 
-function html(body: string, status = 200) {
-  return new Response(body, {
-    status,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+function redirectToBot(start?: string) {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: botUrl(start),
+      "Cache-Control": "no-store",
+    },
   });
 }
 
@@ -25,13 +26,13 @@ Deno.serve(async (req) => {
     const url = new URL(req.url);
     const error = url.searchParams.get("error");
     if (error) {
-      return html("Авторизацію скасовано. Поверніться в Telegram.", 400);
+      return redirectToBot("oauth_cancel");
     }
 
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     if (!code || !state) {
-      return html("Немає code/state. Запустіть підключення знову в боті.", 400);
+      return redirectToBot("oauth_error");
     }
 
     const db = adminClient();
@@ -42,17 +43,20 @@ Deno.serve(async (req) => {
       .maybeSingle();
     if (stErr) throw stErr;
     if (!row) {
-      return html("Прострочений або невірний state. Спробуйте /connect знову.", 400);
+      return redirectToBot("oauth_expired");
     }
 
     const tokens = await exchangeCode(code);
     const existing = await getUser(db, row.telegram_id);
     const refresh = tokens.refresh_token || existing?.google_refresh_token;
     if (!refresh) {
-      return html(
-        "Google не повернув refresh token. Відклич доступ у myaccount.google.com/permissions і спробуй знову.",
-        400,
+      await sendMessage(
+        row.telegram_id,
+        "Не вдалося підключити календар: Google не повернув refresh token.\n" +
+          "Відклич доступ EventPing у https://myaccount.google.com/permissions і спробуй знову.",
+        { reply_markup: mainKeyboard(false) },
       );
+      return redirectToBot("oauth_token");
     }
 
     const expiry = new Date(Date.now() + (tokens.expires_in || 3600) * 1000)
@@ -71,9 +75,9 @@ Deno.serve(async (req) => {
       { reply_markup: mainKeyboard(true) },
     );
 
-    return html(OK_HTML);
+    return redirectToBot();
   } catch (err) {
     console.error(err);
-    return html(`Помилка авторизації: ${err}`, 500);
+    return redirectToBot("oauth_error");
   }
 });
