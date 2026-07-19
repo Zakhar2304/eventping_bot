@@ -17,10 +17,15 @@ import {
   type ReminderRule,
 } from "../_shared/db.ts";
 import {
+  calendarForTimezone,
+  monthCalendarKeyboard,
+  parseCalNav,
+  parseCalPick,
+} from "../_shared/calendar_kb.ts";
+import {
   addDaysYmd,
   formatMinutes,
   formatYmd,
-  nextWeekday,
   nowParts,
   parseBeforeText,
   parseDateText,
@@ -62,29 +67,8 @@ function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function dateKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        { text: "Сьогодні", callback_data: "date:today" },
-        { text: "Завтра", callback_data: "date:tomorrow" },
-      ],
-      [{ text: "Післязавтра", callback_data: "date:after" }],
-      [
-        { text: "Пн", callback_data: "date:wd:1" },
-        { text: "Вт", callback_data: "date:wd:2" },
-        { text: "Ср", callback_data: "date:wd:3" },
-        { text: "Чт", callback_data: "date:wd:4" },
-      ],
-      [
-        { text: "Пт", callback_data: "date:wd:5" },
-        { text: "Сб", callback_data: "date:wd:6" },
-        { text: "Нд", callback_data: "date:wd:0" },
-      ],
-      [{ text: "📅 Інша дата…", callback_data: "date:custom" }],
-      [{ text: "❌ Скасувати", callback_data: "event:cancel" }],
-    ],
-  };
+function dateKeyboard(timeZone: string, y?: number, m?: number) {
+  return calendarForTimezone(timeZone, y, m);
 }
 
 function confirmKb() {
@@ -355,12 +339,13 @@ async function startCreateFlow(
   db: ReturnType<typeof adminClient>,
   chatId: number,
   telegramId: number,
+  timeZone: string,
 ) {
   await setSession(db, telegramId, "create_date", {});
   await sendMessage(
     chatId,
-    "<b>Нова подія</b>\nКрок 1/3 — обери дату:",
-    { reply_markup: dateKeyboard() },
+    "<b>Нова подія</b>\nОбери день у календарі 👇\n<i>•сьогодні• — обведено крапками</i>",
+    { reply_markup: dateKeyboard(timeZone) },
   );
 }
 
@@ -681,7 +666,7 @@ async function handleMessage(
       });
       return;
     }
-    await startCreateFlow(db, chatId, user.telegram_id);
+    await startCreateFlow(db, chatId, user.telegram_id, user.timezone);
     return;
   }
 
@@ -974,16 +959,18 @@ async function startConnect(
 async function resolveDateCallback(
   data: string,
   timezone: string,
-): Promise<Ymd | "custom" | null> {
+): Promise<Ymd | "custom" | "noop" | null> {
   const ctx = nowParts(timezone);
-  if (data === "date:today") return { y: ctx.y, m: ctx.m, d: ctx.d };
-  if (data === "date:tomorrow") return addDaysYmd(ctx, 1);
-  if (data === "date:after") return addDaysYmd(ctx, 2);
-  if (data === "date:custom") return "custom";
-  if (data.startsWith("date:wd:")) {
-    const wd = Number(data.split(":")[2]);
-    return nextWeekday(timezone, wd);
+  if (data === "cal:noop") return "noop";
+  if (data === "cal:today" || data === "date:today") {
+    return { y: ctx.y, m: ctx.m, d: ctx.d };
   }
+  if (data === "cal:tomorrow" || data === "date:tomorrow") {
+    return addDaysYmd(ctx, 1);
+  }
+  if (data === "cal:custom" || data === "date:custom") return "custom";
+  const picked = parseCalPick(data);
+  if (picked) return picked;
   return null;
 }
 
@@ -1149,14 +1136,34 @@ async function handleCallback(
     return;
   }
 
-  // --- create / edit date picker ---
-  if (data.startsWith("date:")) {
+  // --- month calendar navigation ---
+  if (data.startsWith("cal:nav:")) {
+    const nav = parseCalNav(data);
+    await answerCallback(cq.id);
+    if (nav && messageId) {
+      await editMessageText(
+        chatId,
+        messageId,
+        "Обери день у календарі 👇\n<i>•день• — сьогодні</i>",
+        { reply_markup: monthCalendarKeyboard(nav.y, nav.m, user.timezone) },
+      );
+    }
+    return;
+  }
+
+  // --- create / edit date picker (calendar) ---
+  if (data.startsWith("cal:") || data.startsWith("date:")) {
     const session = await getSession(db, user.telegram_id);
     const resolved = await resolveDateCallback(data, user.timezone);
+    if (resolved === "noop") {
+      await answerCallback(cq.id);
+      return;
+    }
     await answerCallback(cq.id);
     if (resolved === "custom") {
       const returnTo = session?.state === "edit_event" ||
-          session?.data?.returnTo === "edit_event"
+          session?.data?.returnTo === "edit_event" ||
+          session?.data?.pickingDateFor === "edit"
         ? "edit_event"
         : session?.state === "create_confirm" ||
             session?.data?.returnTo === "create_confirm"
@@ -1223,7 +1230,7 @@ async function handleCallback(
         await editMessageText(
           chatId,
           messageId,
-          `Дата: <b>${formatYmd(resolved)}</b>`,
+          `Дата: <b>${formatYmd(resolved)}</b> ✓`,
         );
       }
       await askTime(db, chatId, user.telegram_id, resolved);
@@ -1242,7 +1249,7 @@ async function handleCallback(
   if (data === "event:restart") {
     await answerCallback(cq.id);
     if (messageId) await editMessageText(chatId, messageId, "Починаємо знову…");
-    await startCreateFlow(db, chatId, user.telegram_id);
+    await startCreateFlow(db, chatId, user.telegram_id, user.timezone);
     return;
   }
 
@@ -1294,8 +1301,8 @@ async function handleCallback(
       returnTo: "create_confirm",
     });
     if (messageId) {
-      await editMessageText(chatId, messageId, "Обери нову дату:", {
-        reply_markup: dateKeyboard(),
+      await editMessageText(chatId, messageId, "Обери день у календарі 👇", {
+        reply_markup: dateKeyboard(user.timezone),
       });
     }
     return;
@@ -1510,8 +1517,8 @@ async function handleCallback(
       pickingDateFor: "edit",
     });
     if (messageId) {
-      await editMessageText(chatId, messageId, "Обери нову дату:", {
-        reply_markup: dateKeyboard(),
+      await editMessageText(chatId, messageId, "Обери день у календарі 👇", {
+        reply_markup: dateKeyboard(user.timezone),
       });
     }
     return;
