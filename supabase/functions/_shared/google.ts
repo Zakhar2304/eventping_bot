@@ -226,12 +226,17 @@ export async function createEvent(
 export async function eventsNeedingReminder(
   db: SupabaseClient,
   user: DbUser,
+  beforeMinutesList: number[],
   windowMinutes = 1,
-): Promise<Array<{ event: CalendarEvent; remindAt: Date }>> {
+): Promise<Array<{ event: CalendarEvent; remindAt: Date; minutesBefore: number }>> {
+  const offsets = beforeMinutesList.length
+    ? beforeMinutesList
+    : [user.reminder_minutes || 30];
+  const maxBefore = Math.max(...offsets);
   const token = await refreshAccessToken(db, user);
   const now = new Date();
   const lookAhead = new Date(
-    now.getTime() + (user.reminder_minutes + windowMinutes + 1) * 60_000,
+    now.getTime() + (maxBefore + windowMinutes + 1) * 60_000,
   );
   const url = new URL(
     `https://www.googleapis.com/calendar/v3/calendars/${
@@ -252,16 +257,16 @@ export async function eventsNeedingReminder(
     throw new Error(json.error?.message || "Calendar reminder fetch failed");
   }
   const items = (json.items || []) as Record<string, unknown>[];
-  const due: Array<{ event: CalendarEvent; remindAt: Date }> = [];
+  const due: Array<{ event: CalendarEvent; remindAt: Date; minutesBefore: number }> = [];
   for (const item of items) {
     const event = parseEvent(item, user.timezone);
     if (!event || event.allDay) continue;
-    const remindAt = new Date(
-      event.start.getTime() - user.reminder_minutes * 60_000,
-    );
-    const deltaSec = (remindAt.getTime() - now.getTime()) / 1000;
-    if (deltaSec >= -windowMinutes * 60 && deltaSec <= windowMinutes * 60) {
-      due.push({ event, remindAt });
+    for (const minutesBefore of offsets) {
+      const remindAt = new Date(event.start.getTime() - minutesBefore * 60_000);
+      const deltaSec = (remindAt.getTime() - now.getTime()) / 1000;
+      if (deltaSec >= -windowMinutes * 60 && deltaSec <= windowMinutes * 60) {
+        due.push({ event, remindAt, minutesBefore });
+      }
     }
   }
   return due;

@@ -20,13 +20,14 @@ echo "==> Linking project (if needed)"
 supabase link --project-ref "$PROJECT_REF" || true
 
 echo "==> Setting secrets"
+# Note: custom secrets cannot be named SUPABASE_*.
+# Edge runtime already provides SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.
 supabase secrets set \
   --project-ref "$PROJECT_REF" \
   BOT_TOKEN="$BOT_TOKEN" \
   GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
   GOOGLE_CLIENT_SECRET="$GOOGLE_CLIENT_SECRET" \
-  SUPABASE_SECRET_KEY="$SUPABASE_KEY" \
-  SUPABASE_URL="$SUPABASE_URL" \
+  SERVICE_KEY="$SUPABASE_KEY" \
   PUBLIC_BASE_URL="$PUBLIC_BASE_URL" \
   DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Kyiv}" \
   DEFAULT_REMINDER_MINUTES="${DEFAULT_REMINDER_MINUTES:-30}" \

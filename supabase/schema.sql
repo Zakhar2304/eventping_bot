@@ -1,5 +1,5 @@
--- EventPing schema for Supabase Edge Functions hosting
--- Run in SQL Editor: https://supabase.com/dashboard/project/aulroejrprwekgepitiw/sql
+-- EventPing schema — run in SQL Editor
+-- https://supabase.com/dashboard/project/aulroejrprwekgepitiw/sql
 
 create table if not exists users (
   telegram_id bigint primary key,
@@ -38,6 +38,28 @@ create table if not exists oauth_states (
   created_at timestamptz not null default now()
 );
 
+-- Multiple reminders: before event OR absolute datetime
+create table if not exists reminder_rules (
+  id bigserial primary key,
+  telegram_id bigint not null references users(telegram_id) on delete cascade,
+  kind text not null check (kind in ('before', 'absolute')),
+  minutes_before integer,
+  absolute_at timestamptz,
+  title text,
+  created_at timestamptz not null default now(),
+  constraint reminder_rules_shape check (
+    (kind = 'before' and minutes_before is not null and minutes_before > 0)
+    or (kind = 'absolute' and absolute_at is not null)
+  )
+);
+
+create index if not exists idx_reminder_rules_user
+  on reminder_rules (telegram_id);
+
+create index if not exists idx_reminder_rules_absolute
+  on reminder_rules (absolute_at)
+  where kind = 'absolute';
+
 create index if not exists idx_users_active_connected
   on users (is_active)
   where google_refresh_token is not null;
@@ -52,8 +74,16 @@ alter table users enable row level security;
 alter table sent_reminders enable row level security;
 alter table bot_sessions enable row level security;
 alter table oauth_states enable row level security;
+alter table reminder_rules enable row level security;
 
--- Optional: clean stale oauth states older than 1 hour
+-- Seed default "30 хв до" for users who have no rules yet
+insert into reminder_rules (telegram_id, kind, minutes_before)
+select u.telegram_id, 'before', coalesce(u.reminder_minutes, 30)
+from users u
+where not exists (
+  select 1 from reminder_rules r where r.telegram_id = u.telegram_id
+);
+
 create or replace function cleanup_oauth_states()
 returns void
 language sql

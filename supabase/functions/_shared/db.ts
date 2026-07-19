@@ -13,13 +13,22 @@ export type DbUser = {
   is_active: boolean;
 };
 
+export type ReminderRule = {
+  id: number;
+  telegram_id: number;
+  kind: "before" | "absolute";
+  minutes_before: number | null;
+  absolute_at: string | null;
+  title: string | null;
+};
+
 export function getEnv(name: string, fallback = ""): string {
   return Deno.env.get(name) ?? fallback;
 }
 
 export function adminClient(): SupabaseClient {
   const url = getEnv("SUPABASE_URL");
-  const key = getEnv("SUPABASE_SECRET_KEY") ||
+  const key = getEnv("SERVICE_KEY") ||
     getEnv("SUPABASE_SERVICE_ROLE_KEY") ||
     getEnv("SUPABASE_KEY");
   if (!url || !key) {
@@ -49,7 +58,9 @@ export async function upsertUser(
       .select("*")
       .single();
     if (error) throw error;
-    return data as DbUser;
+    const user = data as DbUser;
+    await ensureDefaultReminder(db, user.telegram_id, user.reminder_minutes);
+    return user;
   }
   const { data, error } = await db
     .from("users")
@@ -67,7 +78,9 @@ export async function upsertUser(
     .select("*")
     .single();
   if (error) throw error;
-  return data as DbUser;
+  const user = data as DbUser;
+  await ensureDefaultReminder(db, user.telegram_id, user.reminder_minutes);
+  return user;
 }
 
 export async function getUser(
@@ -135,4 +148,96 @@ export async function getSession(db: SupabaseClient, telegramId: number) {
 
 export async function clearSession(db: SupabaseClient, telegramId: number) {
   await setSession(db, telegramId, null, {});
+}
+
+export async function listReminderRules(
+  db: SupabaseClient,
+  telegramId: number,
+): Promise<ReminderRule[]> {
+  const { data, error } = await db
+    .from("reminder_rules")
+    .select("*")
+    .eq("telegram_id", telegramId)
+    .order("id", { ascending: true });
+  if (error) throw error;
+  return (data as ReminderRule[]) ?? [];
+}
+
+export async function ensureDefaultReminder(
+  db: SupabaseClient,
+  telegramId: number,
+  minutes = 30,
+) {
+  const rules = await listReminderRules(db, telegramId);
+  if (rules.length) return;
+  await db.from("reminder_rules").insert({
+    telegram_id: telegramId,
+    kind: "before",
+    minutes_before: minutes,
+  });
+}
+
+export async function addBeforeReminder(
+  db: SupabaseClient,
+  telegramId: number,
+  minutes: number,
+): Promise<ReminderRule> {
+  const { data, error } = await db
+    .from("reminder_rules")
+    .insert({
+      telegram_id: telegramId,
+      kind: "before",
+      minutes_before: minutes,
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+  // keep legacy field in sync with first before-rule
+  await syncLegacyReminderMinutes(db, telegramId);
+  return data as ReminderRule;
+}
+
+export async function addAbsoluteReminder(
+  db: SupabaseClient,
+  telegramId: number,
+  absoluteAt: string,
+  title: string,
+): Promise<ReminderRule> {
+  const { data, error } = await db
+    .from("reminder_rules")
+    .insert({
+      telegram_id: telegramId,
+      kind: "absolute",
+      absolute_at: absoluteAt,
+      title,
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data as ReminderRule;
+}
+
+export async function deleteReminderRule(
+  db: SupabaseClient,
+  telegramId: number,
+  ruleId: number,
+) {
+  const { error } = await db
+    .from("reminder_rules")
+    .delete()
+    .eq("telegram_id", telegramId)
+    .eq("id", ruleId);
+  if (error) throw error;
+  await syncLegacyReminderMinutes(db, telegramId);
+}
+
+async function syncLegacyReminderMinutes(
+  db: SupabaseClient,
+  telegramId: number,
+) {
+  const rules = await listReminderRules(db, telegramId);
+  const first = rules.find((r) => r.kind === "before" && r.minutes_before);
+  if (first?.minutes_before) {
+    await updateUser(db, telegramId, { reminder_minutes: first.minutes_before });
+  }
 }
