@@ -1,9 +1,18 @@
 <!DOCTYPE html>
-<html lang="uk">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>EventPing</title>
+  <title>EventPing — Telegram bot for Google Calendar</title>
+  <meta name="description" content="EventPing is a Telegram bot that connects to Google Calendar to show upcoming events, create and edit calendar entries, and send reminders in Telegram." />
+  <!--
+    Google Search Console verification:
+    1) Open https://search.google.com/search-console
+    2) Add property (URL prefix): https://eventpingbot.netlify.app/
+    3) Choose "HTML tag" method
+    4) Paste the meta tag BELOW this comment (replace this whole comment block)
+    5) Redeploy Netlify, then click Verify
+  -->
   <style>
     :root {
       --bg: #0f172a;
@@ -18,58 +27,125 @@
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
       background: radial-gradient(1200px 600px at 20% -10%, #1d4ed833, transparent), var(--bg);
       color: var(--text);
-      line-height: 1.6;
+      line-height: 1.65;
       min-height: 100vh;
     }
     main {
-      max-width: 720px;
+      max-width: 780px;
       margin: 0 auto;
       padding: 3rem 1.25rem 4rem;
     }
-    h1 { font-size: 2.4rem; margin: 0 0 .5rem; letter-spacing: -0.03em; }
-    h2 { font-size: 1.2rem; margin: 2rem 0 .75rem; }
+    .brand {
+      font-size: .85rem;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--accent);
+      font-weight: 700;
+      margin: 0 0 .75rem;
+    }
+    h1 { font-size: clamp(2rem, 5vw, 2.6rem); margin: 0 0 .75rem; letter-spacing: -0.03em; }
+    h2 { font-size: 1.2rem; margin: 0 0 .75rem; color: var(--text); }
     p, li { color: var(--muted); }
     a { color: var(--accent); }
+    .lead { font-size: 1.125rem; max-width: 40rem; }
     .card {
       background: var(--card);
       border-radius: 16px;
       padding: 1.25rem 1.4rem;
-      margin-top: 1.5rem;
+      margin-top: 1.25rem;
     }
-    .links { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; margin-top: 1.5rem; }
+    .links { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; margin-top: 1.75rem; }
     .cta {
       display: inline-block;
-      margin-top: 1.5rem;
+      margin-top: 1.4rem;
       background: #0284c7;
       color: white !important;
       text-decoration: none;
-      padding: .7rem 1.1rem;
+      padding: .75rem 1.15rem;
       border-radius: 10px;
       font-weight: 600;
     }
+    .grid { display: grid; gap: 1rem; margin-top: 1rem; }
+    @media (min-width: 700px) {
+      .grid { grid-template-columns: 1fr 1fr; }
+    }
+    .note { font-size: .95rem; margin-top: 1.5rem; }
   </style>
 </head>
 <body>
   <main>
+    <p class="brand">EventPing</p>
     <h1>EventPing</h1>
-    <p>Telegram-бот для Google Calendar: нагадування про події та швидке створення записів.</p>
+    <p class="lead">
+      <strong>EventPing</strong> is a Telegram bot that connects to your
+      <strong>Google Calendar</strong> so you can manage events and get reminders
+      without leaving Telegram.
+    </p>
 
-    <a class="cta" href="https://t.me/eventping_bot">Відкрити бота в Telegram</a>
+    <a class="cta" href="https://t.me/eventping_bot">Open EventPing in Telegram</a>
 
     <div class="card">
-      <h2>Що робить EventPing</h2>
+      <h2>Purpose of the application</h2>
+      <p>
+        EventPing helps people plan their day by bridging Telegram and Google Calendar.
+        After you sign in with Google, the bot can:
+      </p>
       <ul>
-        <li>підключає ваш Google Calendar через безпечний OAuth;</li>
-        <li>показує найближчі події;</li>
-        <li>створює та редагує записи;</li>
-        <li>надсилає нагадування в Telegram.</li>
+        <li>connect securely to your Google Calendar using OAuth 2.0;</li>
+        <li>list upcoming calendar events;</li>
+        <li>create and edit events (title, date, time, description);</li>
+        <li>send Telegram reminders before events, based on your settings.</li>
       </ul>
+      <p>
+        The official Telegram bot is
+        <a href="https://t.me/eventping_bot">@eventping_bot</a>.
+      </p>
     </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>How it works</h2>
+        <ol>
+          <li>Open EventPing in Telegram.</li>
+          <li>Connect Google Calendar and grant calendar access.</li>
+          <li>Create events or browse upcoming ones.</li>
+          <li>Receive reminders in Telegram before each event.</li>
+        </ol>
+      </div>
+      <div class="card">
+        <h2>Data &amp; privacy</h2>
+        <p>
+          EventPing only uses Google Calendar data to provide bot features you request.
+          You can disconnect the calendar in the bot and revoke Google access at any time.
+        </p>
+        <p>
+          Read the
+          <a href="./privacy.html">Privacy Policy</a>
+          and
+          <a href="./terms.html">Terms of Service</a>.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Про EventPing (українською)</h2>
+      <p>
+        <strong>EventPing</strong> — Telegram-бот для Google Calendar.
+        Він підключає ваш календар, показує найближчі події, дозволяє створювати
+        й редагувати записи та надсилає нагадування в Telegram.
+      </p>
+    </div>
+
+    <p class="note">
+      Developer contact:
+      <a href="mailto:zavgorodniy.875@gmail.com">zavgorodniy.875@gmail.com</a>
+    </p>
 
     <div class="links">
       <a href="./privacy.html">Privacy Policy</a>
       <a href="./terms.html">Terms of Service</a>
-      <a href="https://github.com/Zakhar2304/eventping_bot">GitHub</a>
+      <a href="https://t.me/eventping_bot">Telegram bot</a>
+      <a href="https://github.com/Zakhar2304/eventping_bot">Source code</a>
     </div>
   </main>
 </body>
